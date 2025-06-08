@@ -1,256 +1,332 @@
-#!/usr/bin/env python3
-"""
-Document Processing Pipeline for Service Request RAG Application
-This script processes legacy Service Request documents and ingests them into Llama Stack
-"""
-
-# import os
-# import asyncio
-from pathlib import Path
-from typing import List, Dict, Any
-from datetime import datetime
-
-# Llama Stack SDK
+import gradio as gr
 from llama_stack_client import LlamaStackClient
-
-# Document processing libraries
-# import PyPDF2
-from docx import Document as DocxDocument
-import mammoth  # For better DOCX to text conversion
+import json
+from typing import List, Tuple, Dict, Any
+from llama_stack_client.types import SamplingParams
 
 
-class ServiceRequestProcessor:
-    def __init__(self, llama_stack_port: str = "8321"):
-        self.llama_stack_port = llama_stack_port
+class RAGChatbot:
+    def __init__(
+        self, llama_stack_port: str = "8321", vector_db_id: str = "service_requests_db"
+    ):
+        """Initialize the RAG chatbot with LlamaStack client."""
         self.client = LlamaStackClient(base_url=f"http://localhost:{llama_stack_port}")
-        self.chunk_size = 1000  # Characters per chunk
-        self.chunk_overlap = 200  # Overlap between chunks
+        self.vector_db_id = vector_db_id
+        self.model_id = "meta-llama/Llama-3.2-1B-Instruct"  # Adjust based on your setup
 
-    def extract_text_from_docx(self, file_path: str) -> str:
-        """Extract text from DOCX files (modern Word format)"""
+        # Test the connection and print available methods
+        self.test_connection()
+
+    def test_connection(self):
+        """Test the connection and inspect available methods."""
         try:
-            # Using mammoth for better formatting preservation
-            with open(file_path, "rb") as docx_file:
-                result = mammoth.extract_raw_text(docx_file)
-                return result.value
-        except Exception as e:
-            print(f"Error processing DOCX {file_path}: {e}")
-            # Fallback to python-docx
+            print("Testing LlamaStack connection...")
+            print(f"Client base URL: {self.client.base_url}")
+
+            # Check vector_io methods
+            if hasattr(self.client, "vector_io"):
+                print("vector_io methods available:")
+                vector_io_methods = [
+                    method
+                    for method in dir(self.client.vector_io)
+                    if not method.startswith("_")
+                ]
+                print(f"  {vector_io_methods}")
+
+            # Try to list available vector databases
             try:
-                doc = DocxDocument(file_path)
-                text = ""
-                for paragraph in doc.paragraphs:
-                    text += paragraph.text + "\n"
-                return text
-            except:
-                return ""
+                # This might help identify the correct method
+                dbs = self.client.vector_io.list_vector_dbs()
+                print(f"Available vector databases: {dbs}")
+            except Exception as e:
+                print(f"Could not list vector databases: {e}")
 
-    def extract_document_text(self, file_path: str) -> str:
-        """Extract text based on file extension"""
-        file_ext = Path(file_path).suffix.lower()
-
-        if file_ext == ".docx":
-            return self.extract_text_from_docx(file_path)
-        else:
-            print(f"Unsupported file type: {file_ext}")
-            return ""
-
-    def chunk_text(self, text: str, metadata: Dict[str, Any]) -> List[Dict[str, Any]]:
-        """Split text into chunks for better retrieval"""
-        chunks = []
-        words = text.split()
-
-        for i in range(0, len(words), self.chunk_size):
-            chunk_words = words[i : i + self.chunk_size + self.chunk_overlap]
-            chunk_text = " ".join(chunk_words)
-
-            chunk_metadata = metadata.copy()
-            chunk_metadata.update(
-                {
-                    "chunk_index": len(chunks),
-                    "chunk_start": i,
-                    "chunk_end": min(i + self.chunk_size, len(words)),
-                }
-            )
-
-            chunks.append({"text": chunk_text, "metadata": chunk_metadata})
-
-        return chunks
-
-    def extract_metadata(self, file_path: str) -> Dict[str, Any]:
-        """Extract metadata from file path and content"""
-        path = Path(file_path)
-
-        # Basic metadata
-        metadata = {
-            "filename": path.name,
-            "file_type": path.suffix.lower(),
-            "file_path": str(path),
-            "category": path.parent.name,  # specs, requirements, apis, etc.
-            "processed_date": datetime.now().isoformat(),
-            "file_size": path.stat().st_size if path.exists() else 0,
-        }
-
-        # Try to extract additional metadata from filename
-        filename_lower = path.stem.lower()
-
-        # Identify service type from filename
-        if "user" in filename_lower or "auth" in filename_lower:
-            metadata["service_type"] = "authentication"
-        elif "payment" in filename_lower or "billing" in filename_lower:
-            metadata["service_type"] = "payment"
-        elif "report" in filename_lower or "analytics" in filename_lower:
-            metadata["service_type"] = "reporting"
-        elif "api" in filename_lower:
-            metadata["service_type"] = "api"
-        else:
-            metadata["service_type"] = "general"
-
-        # Identify document type
-        if "spec" in filename_lower or "specification" in filename_lower:
-            metadata["document_type"] = "specification"
-        elif "requirement" in filename_lower:
-            metadata["document_type"] = "requirements"
-        elif "api" in filename_lower:
-            metadata["document_type"] = "api_documentation"
-        else:
-            metadata["document_type"] = "general"
-
-        return metadata
-
-    def register_vector_store(self, vector_db_id: str = "service_requests_db"):
-        """Register a vector database using the SDK"""
-        try:
-            response = self.client.vector_dbs.register(
-                vector_db_id=vector_db_id,
-                embedding_model="all-MiniLM-L6-v2",
-                embedding_dimension=384,
-                provider_id="faiss",
-            )
-            print(f"✅ Registered vector database: {response}")
-            print(f"✅ Registered vector database: {vector_db_id}")
-            return True
         except Exception as e:
-            # Check if it already exists
-            if "already exists" in str(e).lower():
-                print(f"✅ Vector database '{vector_db_id}' already exists")
-                return True
+            print(f"Connection test failed: {e}")
+
+    def retrieve_context(self, query: str, k: int = 5) -> List[Dict[str, Any]]:
+        """Retrieve relevant documents from vector database."""
+        try:
+            # Use the correct API format with params dictionary
+            vector_db_response = self.client.vector_io.query(
+                vector_db_id=self.vector_db_id,
+                query=query,
+                params={
+                    "k": k,  # top_k parameter goes in params dict
+                    "include_metadata": True,  # Include metadata if available
+                },
+            )
+
+            print(f"Vector DB Response Type: {type(vector_db_response)}")
+            print(f"Vector DB Response: {vector_db_response}")
+
+            # QueryChunksResponse has chunks: List[Chunk] and scores: List[float]
+            documents = []
+
+            if hasattr(vector_db_response, "chunks") and vector_db_response.chunks:
+                chunks = vector_db_response.chunks
+                scores = getattr(vector_db_response, "scores", [])
+
+                print(f"Found {len(chunks)} chunks with {len(scores)} scores")
+
+                # Combine chunks with their scores
+                for i, chunk in enumerate(chunks):
+                    score = scores[i] if i < len(scores) else None
+
+                    # Create a dict combining chunk data with score
+                    chunk_dict = {"chunk": chunk, "score": score, "index": i}
+                    documents.append(chunk_dict)
+
+                print(f"First chunk type: {type(chunks[0])}")
+                if hasattr(chunks[0], "__dict__"):
+                    print(
+                        f"First chunk attributes: {[attr for attr in dir(chunks[0]) if not attr.startswith('_')]}"
+                    )
+
+                # Show first chunk content for debugging
+                print(f"First chunk sample: {str(chunks[0])[:200]}...")
+
             else:
-                print(f"❌ Failed to register vector database: {e}")
-                return False
+                print(
+                    f"Response attributes: {[attr for attr in dir(vector_db_response) if not attr.startswith('_')]}"
+                )
+                print("No chunks found in response")
 
-    def list_vector_stores(self):
-        """List all available vector databases"""
-        try:
-            response = self.client.vector_dbs.list()
-            print("📋 Available vector databases:")
-            for db in response:
-                print(f"  - {db.vector_db_id} (model: {db.embedding_model})")
-            return response
+            return documents
+
         except Exception as e:
-            print(f"❌ Failed to list vector databases: {e}")
+            print(f"Error retrieving from vector DB: {e}")
+            print(f"Exception type: {type(e)}")
+
+            # Try without params as fallback
+            try:
+                print("Trying query without params...")
+                vector_db_response = self.client.vector_io.query(
+                    vector_db_id=self.vector_db_id, query=query
+                )
+                print(f"Fallback query response: {vector_db_response}")
+
+                if hasattr(vector_db_response, "chunks"):
+                    chunks = (
+                        vector_db_response.chunks[:k]
+                        if vector_db_response.chunks
+                        else []
+                    )
+                    scores = getattr(vector_db_response, "scores", [])[:k]
+
+                    documents = []
+                    for i, chunk in enumerate(chunks):
+                        score = scores[i] if i < len(scores) else None
+                        documents.append({"chunk": chunk, "score": score, "index": i})
+                    return documents
+
+            except Exception as e2:
+                print(f"Fallback query also failed: {e2}")
+
             return []
 
-    def ingest_document_chunks(
-        self, chunks: List[Dict[str, Any]], vector_db_id: str = "service_requests_db"
-    ):
-        """Ingest document chunks into the vector database using SDK"""
+    def format_context(self, retrieved_docs: List[Dict[str, Any]]) -> str:
+        """Format retrieved documents into context string."""
+        if not retrieved_docs:
+            return ""
 
-        # Prepare documents for insertion
-        documents = []
-        for chunk in chunks:
-            # print(f"==>> chunk: {chunk}")
+        context_parts = []
+        for i, doc_dict in enumerate(retrieved_docs, 1):
+            chunk = doc_dict.get("chunk")
+            score = doc_dict.get("score", "N/A")
 
-            chunk["metadata"][
-                "document_id"
-            ] = f"{chunk['metadata']['filename']}_{chunk['metadata']['chunk_index']}"
+            content = ""
 
-            documents.append(
-                {
-                    # "document_id": f"{chunk['metadata']['filename']}_{chunk['metadata']['chunk_index']}",
-                    "content": chunk["text"],
-                    "mime_type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    "metadata": chunk["metadata"],
-                }
+            # Handle different chunk structures
+            if hasattr(chunk, "content"):
+                content = chunk.content
+            elif hasattr(chunk, "text"):
+                content = chunk.text
+            elif hasattr(chunk, "document"):
+                content = chunk.document
+            elif hasattr(chunk, "data"):
+                content = chunk.data
+            elif isinstance(chunk, dict):
+                content = chunk.get(
+                    "content", chunk.get("text", chunk.get("document", str(chunk)))
+                )
+            else:
+                content = str(chunk)
+
+            # Format with score
+            score_str = (
+                f"{score:.4f}" if isinstance(score, (int, float)) else str(score)
             )
-        # print("🚀 ~ documents:", documents)
+            context_parts.append(f"Document {i} (Score: {score_str}):\n{content}")
+
+        print(f"==>> context_parts: {context_parts}")
+        return "\n\n".join(context_parts)
+
+    def create_rag_prompt(self, query: str, context: str) -> str:
+        """Create a RAG prompt combining context and user query."""
+        if not context:
+            return f"""You are a helpful AI assistant. Please answer the following question:
+
+Question: {query}
+
+Answer:"""
+
+        return f"""You are a helpful AI assistant. Use the provided context to answer the user's question. If the context doesn't contain relevant information, say so and provide a general response.
+
+Context:
+{context}
+
+Question: {query}
+
+Answer:"""
+
+    def generate_response(self, prompt: str) -> str:
+        """Generate response using the LLM."""
+        print(f"==>> generate_response:")
 
         try:
-            resposne = self.client.vector_io.insert(
-                vector_db_id=vector_db_id, chunks=documents
+            response = self.client.inference.completion(
+                model_id=self.model_id,
+                content=prompt,
+                sampling_params={"max_tokens": 512, "temperature": 0.7, "top_p": 0.9},
+                # sampling_params={
+                #     "strategy": {
+                #         "type": "greedy",
+                #     },
+                #     "max_tokens": 50,
+                # },
             )
-            print(f"==>> resposne: {resposne}")
-            print(f"✅ Ingested {len(documents)} chunks")
-            return True
+            print(f"==>> response: {response}")
+
+            if hasattr(response, "content") and response.content:
+                return (
+                    response.content[0].text
+                    if isinstance(response.content, list)
+                    else response.content
+                )
+            elif hasattr(response, "text"):
+                return response.text
+            elif hasattr(response, "completion"):
+                return response.completion
+            else:
+                return str(response)
+
         except Exception as e:
-            print(f"❌ Failed to ingest chunks: {e}")
-            return False
+            print(f"Error generating response: {e}")
+            # Fallback to chat completion if inference.completion fails
+            try:
+                messages = [{"role": "user", "content": prompt}]
+                response = self.client.inference.chat_completion(
+                    model_id=self.model_id,
+                    messages=messages,
+                    sampling_params={
+                        "max_tokens": 512,
+                        "temperature": 0.7,
+                        "top_p": 0.9,
+                    },
+                )
 
-    def process_directory(
-        self, directory_path: str, vector_db_id: str = "service_requests_db"
-    ):
-        """Process all documents in a directory"""
-        directory = Path(directory_path)
-
-        if not directory.exists():
-            print(f"❌ Directory does not exist: {directory_path}")
-            return
-
-        # Register vector database
-        if not self.register_vector_store(vector_db_id):
-            print(
-                f"❌ Failed to register vector database. Checking existing databases..."
-            )
-            self.list_vector_stores()
-            return
-
-        # Supported file extensions
-        supported_extensions = {".pdf", ".docx", ".doc", ".txt", ".md"}
-
-        # Process all files
-        processed_count = 0
-        total_chunks = 0
-
-        for file_path in directory.rglob("*"):
-            if file_path.is_file() and file_path.suffix.lower() in supported_extensions:
-                print(f"📄 Processing: {file_path.name}")
-
-                # Extract text
-                text = self.extract_document_text(str(file_path))
-                if not text.strip():
-                    print(f"⚠️  No text extracted from {file_path.name}")
-                    continue
-
-                # Extract metadata
-                metadata = self.extract_metadata(str(file_path))
-
-                # Create chunks
-                chunks = self.chunk_text(text, metadata)
-                # print(f"==>> chunks: {chunks}")
-
-                # Ingest chunks
-                success = self.ingest_document_chunks(chunks, vector_db_id)
-                if success:
-                    processed_count += 1
-                    total_chunks += len(chunks)
-                    print(f"✅ Processed {file_path.name} - {len(chunks)} chunks")
+                if hasattr(response, "completion_message"):
+                    return response.completion_message.content
                 else:
-                    print(f"❌ Failed to process {file_path.name}")
+                    return str(response)
 
-        print(f"\n🎉 Processing complete!")
-        print(f"📊 Files processed: {processed_count}")
-        print(f"📊 Total chunks created: {total_chunks}")
-        print(f"🗃️  Vector database: {vector_db_id}")
+            except Exception as e2:
+                print(f"Error with chat completion: {e2}")
+                return f"Sorry, I encountered an error generating a response: {str(e2)}"
+
+    def rag_chat(
+        self, message: str, history: List[Tuple[str, str]]
+    ) -> Tuple[List[Tuple[str, str]], str]:
+        """Main RAG chat function."""
+        print(f"User message: {message}")
+        print(f"Chat history length: {len(history)}")
+
+        # Step 1: Retrieve relevant context
+        retrieved_docs = self.retrieve_context(message)
+        print(f"Retrieved {len(retrieved_docs)} documents")
+
+        # Step 2: Format context
+        context = self.format_context(retrieved_docs)
+        if context:
+            print(f"Context length: {len(context)} characters")
+        else:
+            print("No context retrieved")
+
+        # Step 3: Create RAG prompt
+        rag_prompt = self.create_rag_prompt(message, context)
+        print(f"==>> rag_prompt: {rag_prompt}")
+
+        # Step 4: Generate response
+        response = self.generate_response(rag_prompt)
+
+        print(f"Generated response: {response[:100]}...")
+
+        # Update history
+        history.append((message, response))
+
+        return history, ""
 
 
-def main():
-    # Initialize processor
-    processor = ServiceRequestProcessor()
-
-    # Process documents
-    documents_path = "./service_requests"  # Update this path
-    processor.process_directory(documents_path)
+# Initialize RAG chatbot
+rag_bot = RAGChatbot()
 
 
+def chatbot_interface(message, history):
+    """Interface function for Gradio."""
+    return rag_bot.rag_chat(message, history)
+
+
+def clear_chat():
+    """Clear chat history."""
+    return [], ""
+
+
+# Create Gradio interface
+with gr.Blocks(title="RAG Chatbot with LlamaStack") as demo:
+    gr.Markdown("# 🤖 RAG Chatbot with LlamaStack")
+    gr.Markdown(
+        "Ask questions and I'll search through the knowledge base to provide relevant answers!"
+    )
+
+    # Display current configuration
+    with gr.Accordion("Configuration", open=False):
+        gr.Markdown(
+            f"""
+        **Current Setup:**
+        - Vector DB ID: `{rag_bot.vector_db_id}`
+        - Model ID: `{rag_bot.model_id}`
+        - LlamaStack URL: `{rag_bot.client.base_url}`
+        """
+        )
+
+    chatbot = gr.Chatbot(value=[], elem_id="chatbot", height=500, show_copy_button=True)
+
+    with gr.Row():
+        msg = gr.Textbox(
+            placeholder="Ask a question about your documents...",
+            container=False,
+            scale=7,
+            label="Your Question",
+        )
+        submit = gr.Button("Send", scale=1, variant="primary")
+        clear = gr.Button("Clear Chat", scale=1)
+
+    # Event handlers
+    submit.click(chatbot_interface, inputs=[msg, chatbot], outputs=[chatbot, msg])
+
+    msg.submit(chatbot_interface, inputs=[msg, chatbot], outputs=[chatbot, msg])
+
+    clear.click(clear_chat, outputs=[chatbot, msg])
+
+# Launch the application
 if __name__ == "__main__":
-    main()
+    print("Starting RAG Chatbot...")
+    print(f"Vector DB ID: {rag_bot.vector_db_id}")
+    print(f"Model ID: {rag_bot.model_id}")
+
+    demo.launch(
+        share=False,  # Set to True for public sharing
+        server_port=7860,
+        server_name="0.0.0.0",
+    )

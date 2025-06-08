@@ -16,3 +16,7 @@ python-dotenv
 langchain
 sentence-transformers
 faiss-cpu
+##juypter notebook
+ipykernel
+## simple frontend
+gradio
