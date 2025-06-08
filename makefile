@@ -12,7 +12,7 @@ INFERENCE_MODEL = llama4
 SQLITE_STORE_DIR = ~/.llama/distributions/ollama
 
 # Targets
-.PHONY: run-ollama run-llamastack tail-ollama-logs curl-ollama
+.PHONY: run-ollama run-llamastack tail-ollama-logs curl-ollama run-all stop-llamastack
 
 run-ollama:
 	@ollama run llama3.2:1b-instruct-fp16 >/dev/null 2>&1 &
@@ -44,9 +44,8 @@ curl-ollama:
 	curl http://localhost:11434/api/generate -d '{ "model": "llama3.2:1b-instruct-fp16", "prompt": "Hello!", "stream": false }'
 
 stop-llamastack:
-	-@docker stop llamastack
-	-@docker rm llamastack
-	@echo "llamastack container stopped and removed.
+	@docker stop llamastack
+	@docker rm llamastack
 
 
 # should have 2 model 1 for embedding(all-minilm:latest) , 1 for inference(llama3.2:1b-instruct-fp16)
