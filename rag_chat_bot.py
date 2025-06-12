@@ -166,19 +166,14 @@ class RAGChatbot:
         """Create a RAG prompt combining context and user query."""
         if not context:
             return f"""You are a helpful AI assistant. Please answer the following question:
-
-Question: {query}
-
-Answer:"""
+                Question: {query}
+                Answer:"""
 
         return f"""You are a helpful AI assistant. Use the provided context to answer the user's question. If the context doesn't contain relevant information, say so and provide a general response.
-
-Context:
-{context}
-
-Question: {query}
-
-Answer:"""
+            Context:
+            {context}
+            Question: {query}
+            Answer:"""
 
     def generate_response(self, prompt: str) -> str:
         """Generate response using the LLM."""
